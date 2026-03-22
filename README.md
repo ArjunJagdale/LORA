@@ -1,102 +1,117 @@
-# Titanic Survival - LoRA Fine-tuned Reasoning Model
+# Heart Failure Risk Assessment - QLoRA Fine-tuned Phi-3 Mini
 
-Fine-tuned `Qwen2.5-0.5B-Instruct` with LoRA to reason in natural language over Titanic passenger data and predict survival outcomes.
-
----
-
-## What it does
-
-Takes a passenger profile as input and produces a natural language reasoning paragraph before predicting survival - not just a label, but a human-readable explanation of *why*.
-
-**Input**
-```
-- Name: Astor, Mr. John Jacob
-- Sex: male
-- Age: 47
-- Class: 1
-- Fare: £227.52
-- Siblings/Spouse aboard: 1
-- Embarked from: Cherbourg
-```
-
-**Output**
-```
-Astor was an adult male passenger travelling first class, boarding at Cherbourg.
-Men had lower evacuation priority. As a first class passenger, they had priority
-access to lifeboats. Paid a high fare of £227.5. Travelled with 1 family member(s).
-Prediction: Did not survive.
-```
+A fine-tuned clinical decision support model that accepts natural language patient descriptions and outputs mortality risk assessments with reasoning. Built on Microsoft Phi-3 Mini using QLoRA on a free Kaggle T4 GPU.
 
 ---
 
-## Training details
+## What It Does
 
-| | |
+Input - plain natural language:
+```
+Patient is a 72-year-old male with high blood pressure and diabetes.
+Ejection fraction is 22%, serum creatinine is 2.4 mg/dL,
+serum sodium is 128 mEq/L, CPK is 1400 mcg/L. Follow-up: 30 days.
+```
+
+Output - risk assessment with reasoning:
+```
+This patient is at high risk of mortality.
+
+Key contributing factors:
+- Severely reduced ejection fraction (22%) indicating poor cardiac function
+- Elevated serum creatinine - reduced kidney function
+- Critically low serum sodium (hyponatremia)
+- Elevated CPK suggesting possible muscle damage
+
+Outcome: The patient did not survive the follow-up period.
+```
+
+If clinical data is incomplete, the model flags exactly what is missing:
+```
+⚠️ Incomplete clinical context detected.
+Serum creatinine and CPK level were not provided.
+These are critical for a complete assessment.
+```
+
+---
+
+## Dataset
+
+- **Source:** UCI Heart Failure Clinical Records Dataset (299 patients, 13 clinical features)
+- **Pipeline:** Each CSV row converted to a natural language paragraph with clinical context added per feature (normal ranges, severity labels)
+- **Training samples:** 399 total
+  - 299 full patient records with complete clinical profiles
+  - 100 partial records with deliberately dropped features to teach the model to flag missing context
+- **Format:** Alpaca-style JSONL `{instruction, input, output}` → formatted into Phi-3 instruct template
+
+---
+
+## Model
+
+| Property | Value |
 |---|---|
-| Base model | `Qwen/Qwen2.5-0.5B-Instruct` |
-| Method | LoRA (r=16, alpha=32) |
-| Target modules | q_proj, k_proj, v_proj, o_proj |
-| Trainable params | 2,162,688 / 496,195,456 (0.44%) |
-| Dataset | Titanic train.csv - 891 rows |
-| Training examples | 2,673 (3 question variants per row) |
-| Train / Val split | 90 / 10 |
-| Epochs | 4 |
-| Batch size | 2 (grad accum 8, effective batch 16) |
-| Learning rate | 1e-4 with cosine scheduler |
-| Hardware | Kaggle Tesla T4 (16GB) |
-| Training time | ~57 minutes |
-
-**Loss progression**
-
-| Epoch | Train Loss | Val Loss |
-|---|---|---|
-| 1 | 0.1579 | 0.1636 |
-| 2 | 0.0782 | 0.0860 |
-| 3 | 0.0498 | 0.0571 |
-| 4 | 0.0448 | 0.0554 |
+| Base model | microsoft/Phi-3-mini-4k-instruct |
+| Parameters | 3.8B |
+| Quantization | 4-bit NF4 (QLoRA) |
+| Trainable params | 3,145,728 (0.08%) |
+| Target modules | qkv_proj, o_proj |
+| LoRA rank | 16 |
+| LoRA alpha | 32 |
 
 ---
 
-## Project structure
+## Training Config
 
-```
-├── titanic_cot_lora.ipynb   ← full training notebook (Kaggle)
-├── train.csv                ← Titanic training data
-├── test.csv                 ← Titanic test data (not used in training)
-└── output/
-    └── lora/final/          ← saved LoRA adapter weights
-```
+| Hyperparameter | Value |
+|---|---|
+| Epochs | 3 |
+| Batch size | 4 |
+| Gradient accumulation | 4 (effective batch = 16) |
+| Learning rate | 2e-4 |
+| Warmup steps | 10 |
+| Optimizer | adamw_8bit |
+| Max sequence length | 512 |
+| Hardware | Kaggle T4 x2 GPU |
+| Training time | ~20 minutes |
 
 ---
 
-## How to run
-
-1. Open on Kaggle, add the Titanic competition dataset
-2. Set accelerator to GPU T4
-3. Run all cells top to bottom - training takes ~57 minutes
+## Stack
 
 ```
-Cell 1  : GPU setup (single GPU enforced)
-Cell 2-5: Load + clean CSV, build CoT examples
-Cell 6  : Save training JSONL
-Cell 7  : Load base model + attach LoRA adapter
-Cell 8  : Format dataset for instruction tuning
-Cell 9  : Train + save adapter
-Cell 10 : Run inference and print reasoning
+unsloth       - QLoRA training, 4-bit model loading
+peft          - LoRA adapter management
+trl           - SFTTrainer
+transformers  - model architecture, tokenizer
+datasets      - JSONL loading and formatting
 ```
 
 ---
 
-## Key design decisions
+## Project Structure
 
-**Natural language reasoning over rigid steps** - instead of forcing a Step 1/2/3 format, the model is trained to produce a single coherent paragraph. This is more natural for a 0.5B model and produces more fluent output.
-
-**3 question variants per row** - each passenger row generates 3 training examples with different question phrasings, tripling the effective dataset size to 2,673 examples without any additional data.
-
-**No quantization** - removed 4-bit quantization to avoid compatibility issues with newer transformers versions. At 0.5B, the model fits comfortably in bfloat16 on a T4.
-
-**Reasoning is grounded in historical rules** - evacuation priority (women first, class priority, family dynamics) is baked into the training labels, so the model learns to cite real factors rather than hallucinate.
+```
+heart_lora_ready.jsonl        training data (399 samples)
+heart_lora_train.py           full training + inference script
+heart-disease-lora.ipynb      Kaggle notebook
+/heart-lora-final/
+    adapter_model.safetensors   LoRA weights (12.6 MB)
+    adapter_config.json
+    tokenizer.json
+```
 
 ---
 
-> Research and portfolio project. Not a production system.
+## Key Design Decisions
+
+**CSV → Text conversion** - Raw tabular data is unreadable to LLMs. Each row was converted to a clinical paragraph with domain context added (e.g. "ejection fraction of 20%, which is severely reduced - critically below the normal range of 55–70%"). This lets the model reason about values rather than memorize numbers.
+
+**Incomplete sample training** - 100 of the 399 samples had clinical features deliberately dropped during data preparation. This teaches the model to recognize when input is incomplete and respond with specific warnings rather than overconfident assessments.
+
+**Natural language inference** - At inference time, input is free-form text. No structured fields required. The model extracts what it can and flags what's missing.
+
+---
+
+## Adapter Size
+
+The full Phi-3 Mini base model is 3.8B parameters (~7.6 GB). The trained LoRA adapter is **12.6 MB** - only the delta from fine-tuning is stored.
